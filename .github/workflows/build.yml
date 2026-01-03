@@ -1,0 +1,69 @@
+name: Build VS Code AppImage
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Get Last Built Version
+        id: last_build
+        run: echo "version=$(cat last_version.txt || echo '0.0.0')" >> $GITHUB_OUTPUT
+
+      - name: Get Latest VSCode Version Info
+        id: get_latest_version
+        run: |
+          FULL_VERSION=$(curl -sIL "https://code.visualstudio.com/sha/download?build=stable&os=linux-deb-x64" | \
+            grep -i "content-disposition:" | tail -1 | \
+            grep -oP 'filename=code_\K[^_]*')
+
+          echo "full_version=$FULL_VERSION" >> $GITHUB_OUTPUT
+          echo "clean_version=$(echo "$FULL_VERSION" | cut -d '-' -f 1)" >> $GITHUB_OUTPUT
+          echo "Latest available version is $FULL_VERSION"
+
+      - name: Build AppImage
+        id: build
+        if: steps.get_latest_version.outputs.full_version != steps.last_build.outputs.version
+        run: |
+          echo "New version detected. Starting build..."
+          chmod +x build-vscode-appimage.sh
+          ./build-vscode-appimage.sh
+
+      - name: Create or Update Release
+        if: steps.build.outputs.appimage_name
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ steps.get_latest_version.outputs.clean_version }}" >/dev/null 2>&1; then
+            echo "Release ${{ steps.get_latest_version.outputs.clean_version }} exists. Uploading new asset..."
+            gh release upload "${{ steps.get_latest_version.outputs.clean_version }}" "${{ steps.build.outputs.appimage_name }}" --clobber
+          else
+            echo "Creating new release for ${{ steps.get_latest_version.outputs.clean_version }}..."
+            gh release create "${{ steps.get_latest_version.outputs.clean_version }}" \
+              --title "Release ${{ steps.get_latest_version.outputs.clean_version }}" \
+              --notes "Automatic release of VS Code ${{ steps.get_latest_version.outputs.clean_version }}" \
+              "${{ steps.build.outputs.appimage_name }}"
+          fi
+
+      - name: Commit New Version
+        if: steps.build.outputs.appimage_name
+        run: |
+          echo "${{ steps.get_latest_version.outputs.full_version }}" > last_version.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add last_version.txt
+          git commit -m "chore: Update last built VSCode version to ${{ steps.get_latest_version.outputs.full_version }}"
+          git push
+
+      - name: Log Skipped Build
+        if: steps.get_latest_version.outputs.full_version == steps.last_build.outputs.version
+        run: echo "No new VSCode version detected. Skipping build."
